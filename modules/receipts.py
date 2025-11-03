@@ -1,16 +1,19 @@
-import binascii
+# ~/governor_ai/modules/receipts.py
+import os
+from datetime import datetime, timezone
 
-def _hex(s: str) -> str:
-    return binascii.hexlify(s.encode()).decode().upper()
+class ReceiptHandler:
+    """
+    Timestamped logger to file + stdout.
+    """
 
-def publish_receipt_onledger(wallet_service, digest: str, tag: str="ADR:v1") -> str:
-    """
-    Writes a tamper-evident receipt of an AI decision to XRPL using a self-payment memo.
-    - digest: sha256 hex string of the decision payload (client computes & submits)
-    - tag: small text tag for grouping (default ADR:v1)
-    Returns: tx hash
-    """
-    memo_text = f"{tag}|sha256={digest}"
-    memo_hex  = _hex(memo_text)
-    tx_hash = wallet_service.self_memo_payment(memo_hex)
-    return tx_hash
+    def __init__(self, log_path="./logs/receipts.log"):
+        self.log_path = log_path
+        os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
+
+    def log(self, message: str):
+        ts = datetime.now(timezone.utc).isoformat()
+        line = f"[{ts}] {message}\n"
+        with open(self.log_path, "a") as f:
+            f.write(line)
+        print(f"[ReceiptHandler] {message}")

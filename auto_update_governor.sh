@@ -1,76 +1,69 @@
 #!/data/data/com.termux/files/usr/bin/bash
 cd ~/governor_ai
 
-# Load environment variables
+# --- Step 1: Load environment variables ---
 source .env
-
 LOGFILE=~/governor_ai/update.log
 REPO_URL="https://github.com/AiGOVERNOR/governor_ai.git"
+TAG_DATE=$(date +"v%Y.%m.%d-%H:%M")
 
 echo "----- $(date): Checking for updates -----" >> $LOGFILE
 
-# Ensure Git repo exists
+# --- Step 2: Ensure valid git repo ---
 if [ ! -d .git ]; then
-  echo "Not a git repo, initializing..." >> $LOGFILE
-  git init
-  git remote add origin $REPO_URL
+    echo "$(date): Not a git repo — initializing..." >> $LOGFILE
+    git init
+    git remote add origin $REPO_URL
+    git fetch origin main >> $LOGFILE 2>&1
+    git reset --hard origin/main >> $LOGFILE 2>&1
 fi
 
-# Fetch updates
+# --- Step 3: Fetch latest from GitHub ---
 git fetch origin main >> $LOGFILE 2>&1
 
-# Compare commits
 LOCAL=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse origin/main)
 
 if [ "$LOCAL" != "$REMOTE" ]; then
-  echo "Update available — pulling latest changes..." >> $LOGFILE
-  git reset --hard origin/main >> $LOGFILE 2>&1
-
-  # -------------------------------
-  # Integrity Verification Section
-  # -------------------------------
-  echo "Verifying code integrity..." >> $LOGFILE
-
-  if [ ! -f checksums.manifest ]; then
-    echo "Creating new checksum baseline..." >> $LOGFILE
-    find . -type f -name "*.py" -exec sha256sum {} \; > checksums.manifest
-  fi
-
-  # Recalculate hashes
-  find . -type f -name "*.py" -exec sha256sum {} \; > checksums.current
-
-  # Compare manifest vs current
-  if diff checksums.manifest checksums.current > /dev/null ; then
-    echo "Integrity check passed. Restarting Governor AI..." >> $LOGFILE
+    echo "$(date): Update detected — pulling latest changes..." >> $LOGFILE
     pkill -f governor.py
-    nohup python governor.py > ~/governor_ai/governor.log 2>&1 &
-    echo "Governor AI restarted successfully at $(date)" >> $LOGFILE
-  else
-    echo "Integrity check FAILED — initiating recovery..." >> $LOGFILE
-    diff checksums.manifest checksums.current >> $LOGFILE
-
-    # Attempt recovery from GitHub
-    echo "Restoring clean version from GitHub..." >> $LOGFILE
     git reset --hard origin/main >> $LOGFILE 2>&1
-    find . -type f -name "*.py" -exec sha256sum {} \; > checksums.manifest
-    echo "Checksum manifest regenerated after recovery." >> $LOGFILE
 
-    # GitHub auto-reporting (requires GITHUB_TOKEN in .env)
-    if [ -n "$GITHUB_TOKEN" ]; then
-      curl -s -X POST \
-        -H "Authorization: token $GITHUB_TOKEN" \
-        -d "{\"title\": \"Integrity Recovery Triggered\", \"body\": \"Governor AI detected corruption at $(date) and auto-recovered from GitHub.\nSee update.log for details.\"}" \
-        https://api.github.com/repos/AiGOVERNOR/governor_ai/issues >> $LOGFILE 2>&1
-      echo "Recovery event reported to GitHub." >> $LOGFILE
+    # --- Step 4: Integrity verification ---
+    find . -type f -name "*.py" -exec sha256sum {} \; > checksums.current
+    if [ ! -f checksums.manifest ]; then
+        echo "$(date): Creating baseline checksum manifest..." >> $LOGFILE
+        find . -type f -name "*.py" -exec sha256sum {} \; > checksums.manifest
     fi
 
-    # Restart safely
-    pkill -f governor.py
+    if diff checksums.manifest checksums.current >/dev/null; then
+        echo "$(date): Integrity check passed." >> $LOGFILE
+    else
+        echo "$(date): Integrity mismatch detected — recovering..." >> $LOGFILE
+        git reset --hard origin/main >> $LOGFILE 2>&1
+        find . -type f -name "*.py" -exec sha256sum {} \; > checksums.manifest
+    fi
+
+    # --- Step 5: Restart AI core ---
     nohup python governor.py > ~/governor_ai/governor.log 2>&1 &
-    echo "Governor AI recovered and restarted at $(date)" >> $LOGFILE
-  fi
+    echo "$(date): Governor AI restarted successfully." >> $LOGFILE
+
+    # --- Step 6: Auto-commit and tag the new version ---
+    git add -A
+    git commit -m "Auto-update and verification at $(date)" >> $LOGFILE 2>&1
+    git tag -a "$TAG_DATE" -m "Governor AI version $TAG_DATE" >> $LOGFILE 2>&1
+    git push origin main --tags >> $LOGFILE 2>&1
+    echo "$(date): Auto-pushed version $TAG_DATE to GitHub." >> $LOGFILE
 
 else
-  echo "No updates detected — system stable." >> $LOGFILE
+    echo "$(date): No updates detected — system stable." >> $LOGFILE
+fi
+
+# --- Step 7: Optional GitHub Auto-Reporting ---
+if [ -n "$GITHUB_TOKEN" ]; then
+    curl -s -X POST \
+        -H "Authorization: token $GITHUB_TOKEN" \
+        -d "{\"title\":\"Governor Auto-Update\",\"body\":\"Governor AI updated and versioned as $TAG_DATE at $(date).\"}" \
+        https://api.github.com/repos/AiGOVERNOR/governor_ai/issues >> $LOGFILE
+    echo "$(date): GitHub report created for tag $TAG_DATE." >> $LOGFILE
 fi

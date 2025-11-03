@@ -1,55 +1,45 @@
+# ~/governor_ai/modules/intel.py
 import json
 import os
-from datetime import datetime
-import random
+from datetime import datetime, timezone
 
 class AIStrategy:
-    def __init__(self, state_path=".state/ai_state.json"):
+    """
+    Governor AI intelligence core (placeholder).
+    Persists state and logs a heartbeat each cycle.
+    """
+
+    def __init__(self, state_path="./.state"):
         self.state_path = state_path
-        os.makedirs(os.path.dirname(state_path), exist_ok=True)
         self.state = self._load_state()
-        self.learning_rate = 0.1
-        self.mode = "adaptive"
-        self.history = []
 
     def _load_state(self):
-        if os.path.exists(self.state_path):
+        if not os.path.exists(self.state_path):
+            return {}
+        try:
             with open(self.state_path, "r") as f:
-                return json.load(f)
-        return {"profit": 0.0, "trades": [], "learning_rate": 0.1}
+                raw = f.read().strip()
+                return json.loads(raw) if raw else {}
+        except Exception as e:
+            print(f"[AIStrategy] Failed to load state: {e}")
+            return {}
 
     def save_state(self):
-        with open(self.state_path, "w") as f:
-            json.dump(self.state, f, indent=2)
+        try:
+            with open(self.state_path, "w") as f:
+                json.dump(self.state, f, indent=2)
+        except Exception as e:
+            print(f"[AIStrategy] Failed to save state: {e}")
 
-    def decide(self, market_signal):
-        confidence = round(random.uniform(0.7, 0.99), 2)
-        decision = "BUY" if market_signal == "bullish" else "SELL"
-        adaptive_comment = f"Governor AI recommends {decision} with {confidence*100}% confidence."
-
-        record = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "signal": market_signal,
-            "decision": decision,
-            "confidence": confidence
-        }
-        self.history.append(record)
-
-        return {
-            "ai_decision": adaptive_comment,
-            "confidence": confidence,
-            "learning_mode": self.mode,
-            "status": "ok"
-        }
-
-    def metrics(self):
-        return {
-            "mode": self.mode,
-            "learning_rate": self.learning_rate,
-            "records_seen": len(self.history)
-        }
-
-    def export_history(self, file_path="ai_strategy_log.json"):
-        with open(file_path, "w") as f:
-            json.dump(self.history, f, indent=2)
-        return f"Exported {len(self.history)} AI strategy records."
+    def run_strategy(self, wallet, receipts):
+        try:
+            ts = datetime.now(timezone.utc).isoformat()
+            addr = wallet.address
+            bal = wallet.get_balance()
+            bal_msg = "unavailable" if bal is None else f"{bal:.6f} XRP"
+            receipts.log(f"AI strategy heartbeat at {ts} for wallet {addr} | Balance: {bal_msg}")
+            self.state["last_run"] = ts
+            self.state["last_balance"] = bal
+            self.save_state()
+        except Exception as e:
+            print(f"[AIStrategy] Error in run_strategy: {e}")

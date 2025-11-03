@@ -1,0 +1,18 @@
+{
+  "nodes": [
+    {
+      "id": "governor_primary",
+      "name": "Termux Node",
+      "url": "http://127.0.0.1:5050",
+      "status": "active",
+      "last_ping": "2025-11-03T14:15:07Z"
+    },
+    {
+      "id": "governor_cloud",
+      "name": "Railway Cloud Node",
+      "url": "https://governorai-production.up.railway.app",
+      "status": "unresponsive",
+      "last_ping": "2025-11-03T14:15:08Z"
+    }
+  ]
+}

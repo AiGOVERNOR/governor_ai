@@ -1,121 +1,122 @@
-import os, json, time, hashlib
-from pathlib import Path
-from flask import Flask, jsonify, request
+# ~/governor_ai/governor.py
+import os
+import time
+import threading
+from datetime import datetime, timezone
+from flask import Flask, jsonify
 from dotenv import load_dotenv
 
-# === Local modules ===
+import json
+import urllib.request
+
+# Load .env early
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+
 from modules.wallet import WalletService
+from modules.receipts import ReceiptHandler
 from modules.intel import AIStrategy
-from modules.receipts import publish_receipt_onledger
+# If you're already using arbitrage, re-enable these two lines later
+# from modules.arbitrage import ArbitrageEngine
 
-load_dotenv()
+app = Flask(__name__)
 
-PORT          = int(os.environ.get("PORT", "5050"))
-XRPL_RPC_URL  = os.environ.get("XRPL_RPC_URL", "https://s.altnet.rippletest.net:51234/")
-TRADER_SEED   = os.environ.get("TRADER_SEED", "")
-SERVICE_ADDR  = os.environ.get("SERVICE_ADDRESS", "")
-API_KEY       = os.environ.get("API_KEY", "localdev")
+wallet = None
+receipts = None
+ai_strategy = None
+# arb = None
 
-app = Flask("governor")
+XRPL_RPC_URL = os.getenv("XRPL_RPC_URL", "https://s.altnet.rippletest.net:51234")
+TRADER_SEED = os.getenv("TRADER_SEED")
+XRPL_NETWORK = os.getenv("XRPL_NETWORK", "testnet")
+AUTO_FAUCET = os.getenv("AUTO_FAUCET", "0") == "1"
 
-# Boot services
-wallet = WalletService(xrpl_url=XRPL_RPC_URL, seed=TRADER_SEED)
-ai     = AIStrategy(state_path=".state/ai_state.json")
 
-def auth_guard(req):
-    token = req.headers.get("X-API-Key")
-    return (API_KEY and token == API_KEY) or (API_KEY == "localdev")
-
-@app.route("/health")
+@app.route("/health", methods=["GET"])
 def health():
-    return jsonify({
-        "status": "healthy",
-        "node_connection": XRPL_RPC_URL,
-        "ai_core": "idle" if ai.empty() else "ready"
-    })
+    return jsonify({"status": "ok", "time": datetime.now(timezone.utc).isoformat()}), 200
 
-@app.route("/wallet", methods=["GET"])
-def wallet_status():
-    try:
-        info = wallet.snapshot()
-        return jsonify({"status":"ok", **info})
-    except Exception as e:
-        return jsonify({"status":"error","message":str(e)}), 500
 
-@app.route("/price", methods=["GET"])
-def price():
-    # Optional: simple passthrough to feed the AI learner
-    sym = request.args.get("symbol", "XRP")
-    src = ai.fetch_price(symbol=sym)
-    return jsonify(src)
-
-@app.route("/ai/learn", methods=["POST"])
-def ai_learn():
-    if not auth_guard(request): return jsonify({"status":"forbidden"}), 403
-    data = request.get_json(silent=True) or {}
-    price = data.get("price")
-    ts    = data.get("ts", time.time())
-    if price is None: return jsonify({"status":"error","message":"price required"}), 400
-    ai.ingest(float(price), ts)
-    return jsonify({"status":"ok","buffer_len":ai.buffer_len()})
-
-@app.route("/ai/strategy", methods=["POST"])
-def ai_strategy():
+def fund_testnet_if_needed(address: str):
     """
-    Body:
-    {
-      "market_signal": "bullish|bearish|neutral" (optional),
-      "risk_aversion": 0..1 (default 0.5)
-    }
+    Calls XRPL testnet faucet if AUTO_FAUCET=1 and balance is missing/zero.
+    Safe on testnet; does nothing on mainnet.
     """
-    try:
-        body = request.get_json(silent=True) or {}
-        market_hint  = body.get("market_signal")
-        risk_averse  = float(body.get("risk_aversion", 0.5))
-        decision = ai.decide(market_hint=market_hint, risk_aversion=risk_averse)
-
-        # Prepare ADR (audit receipt) materials even if user doesn’t publish
-        receipt = {
-            "t": int(time.time()),
-            "kind": "strategy_decision",
-            "decision": decision["action"],
-            "confidence": decision["confidence"],
-            "sl": decision["risk"].get("stop"),
-            "tp": decision["risk"].get("take"),
-            "signal": decision["explain"]["signal"],
-        }
-        digest = hashlib.sha256(json.dumps(receipt, sort_keys=True).encode()).hexdigest()
-        decision["adr_digest"] = digest
-        decision["adr_hint"]   = "POST /receipts/attest to write this decision hash on-ledger"
-
-        return jsonify({"status":"ok","ai_decision":decision})
-    except Exception as e:
-        return jsonify({"status":"error","message":str(e)}), 500
-
-@app.route("/receipts/attest", methods=["POST"])
-def receipts_attest():
-    """
-    Body:
-    {
-      "digest": "<sha256 hex>",  # required
-      "tag": "ADR:v1",           # optional memo tag
-      "fee_drops": 12            # optional fee, default auto
-    }
-    """
-    if not auth_guard(request): return jsonify({"status":"forbidden"}), 403
-    body = request.get_json(silent=True) or {}
-    digest = body.get("digest")
-    tag    = body.get("tag", "ADR:v1")
-    if not digest: return jsonify({"status":"error","message":"digest required"}), 400
+    if XRPL_NETWORK != "testnet" or not AUTO_FAUCET:
+        return
 
     try:
-        tx_hash = publish_receipt_onledger(wallet, digest=digest, tag=tag)
-        return jsonify({"status":"ok","tx_hash":tx_hash})
+        url = "https://faucet.altnet.rippletest.net/accounts"
+        body = json.dumps({"destination": address}).encode()
+        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        print(f"[Governor AI] Testnet faucet request OK for {address}: {data.get('account',{})}")
     except Exception as e:
-        return jsonify({"status":"error","message":str(e)}), 500
+        print(f"[Governor AI] Testnet faucet request failed: {e}")
 
-# --- Convenience: create minimal dirs on first run ---
-Path(".state").mkdir(exist_ok=True)
+
+def initialize_governor():
+    global wallet, receipts, ai_strategy
+    print("[Governor AI] Initializing core modules...")
+
+    if not TRADER_SEED:
+        raise RuntimeError("TRADER_SEED missing in .env file.")
+
+    wallet = WalletService(xrpl_url=XRPL_RPC_URL, seed=TRADER_SEED)
+    receipts = ReceiptHandler(log_path="./logs/receipts.log")
+    ai_strategy = AIStrategy(state_path="./.state")
+
+    # Auto-fund if needed (testnet only)
+    bal = wallet.get_balance()
+    if (bal is None or bal == 0.0) and XRPL_NETWORK == "testnet" and AUTO_FAUCET:
+        print(f"[Governor AI] No balance detected. Attempting testnet funding for {wallet.address}...")
+        fund_testnet_if_needed(wallet.address)
+        # Give the network a moment, then re-check
+        time.sleep(3)
+        bal = wallet.get_balance()
+        print(f"[Governor AI] Post-faucet balance: {bal}")
+
+    print(f"[Governor AI] Wallet loaded: {wallet.address}")
+    print("[Governor AI] Initialization complete.")
+
+    # (Optional) Enable arbitrage later when you have a live IOU with liquidity
+    # global arb
+    # arb = ArbitrageEngine(
+    #     rpc_url=XRPL_RPC_URL,
+    #     quote_currency=os.getenv("QUOTE_CURRENCY"),
+    #     quote_issuer=os.getenv("QUOTE_ISSUER"),
+    #     min_spread_bps=int(os.getenv("ARB_MIN_SPREAD_BPS", "30")),
+    #     max_slippage_bps=int(os.getenv("ARB_MAX_SLIPPAGE_BPS", "20")),
+    #     dry_run=os.getenv("ARB_DRY_RUN", "1") == "1",
+    # )
+    # print(f"[Governor AI] Arbitrage engine ready (DRY_RUN={arb.dry_run})")
+
+
+def ai_background_loop():
+    while True:
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            print(f"[Governor AI] Running background loop at {now}")
+            ai_strategy.run_strategy(wallet, receipts)
+
+            # If arbitrage wired and you have a liquid pair:
+            # ref_price = None
+            # arb.cycle(wallet, receipts, ref_price_xrp_in_quote=ref_price)
+
+        except Exception as e:
+            receipts.log(f"[Governor AI] Error in background loop: {e}")
+        time.sleep(10)
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT)
+    # Ensure state/log folders exist
+    os.makedirs("./logs", exist_ok=True)
+    if not os.path.exists("./.state"):
+        with open("./.state", "w") as f:
+            f.write("{}")
+
+    initialize_governor()
+    t = threading.Thread(target=ai_background_loop, daemon=True)
+    t.start()
+    print("[Governor AI] Flask server starting on port 5050...")
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5050")))
